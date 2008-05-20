@@ -1,0 +1,136 @@
+#! /usr/bin/python
+
+# psdel - list processes that have mapped deleted files
+
+# by Sam Morris <sam@robots.org.uk>
+# version 20080505
+
+# Useful for seeing which processes need to be restarted after you upgrade
+# programs or shared libraries. Written to replace checkrestart(1) from the
+# debian-goodies, which often misses out processes due to bugs in lsof; see
+# <http://bugs.debian.org/264985> for more information.
+
+#   This program is free software; you can redistribute it and/or modify
+#   it under the terms of the GNU General Public License as published by
+#   the Free Software Foundation; either version 2 of the License, or
+#   (at your option) any later version.
+#
+#   This program is distributed in the hope that it will be useful,
+#   but WITHOUT ANY WARRANTY; without even the implied warranty of
+#   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#   GNU General Public License for more details.
+
+import re
+import string
+import os, errno
+import stat
+import pwd
+import sys
+
+numeric = re.compile (r'\d+')
+deleted = re.compile (r'(.*) \(deleted\)$')
+boring = re.compile (r'/(dev/zero|SYSV([\da-f]{8}))')
+
+mapline = re.compile (r'^[\da-f]+-[\da-f]+ [r-][w-][x-][sp-] '
+    r'[\da-f]+ [\da-f]{2}:[\da-f]{2} (\d+) *(.+)( \(deleted\))?\n$')
+
+errors = False
+def error (msg):
+    global errors
+    print >> sys.stderr, 'psdel: %s' % (msg)
+    errors = True
+
+class Process (object):
+    re_name = re.compile('Name:\t(.*)$')
+    re_uids = re.compile('Uid:\t(\d+)\t(\d+)\t(\d+)\t(\d+)$')
+
+    processes = {}
+
+    @staticmethod
+    def get (pid):
+        try:
+            return Process.processes [pid]
+        except KeyError:
+            Process.processes [pid] = Process (pid)
+            return Process.get (pid)
+
+    # private
+    def __init__ (self, pid):
+        self.pid = pid
+
+        status = open ('/proc/%d/status' % (self.pid))
+        for line in status.readlines ():
+            m = self.re_name.match (line)
+            if m:
+                self.name = m.group (1)
+                continue
+            m = self.re_uids.match (line)
+            if m:
+                self.user = pwd.getpwuid (string.atoi (m.group (1)))[0]
+                continue
+        status.close ()
+    
+    def info (self):
+        return '%d %s %s' % (self.pid, self.name, self.user)
+
+def delmaps (pid):
+    seen = set ()
+    
+    try:
+        maps = open('/proc/%d/maps' % (pid))
+    except IOError, (e, strerror):
+        if e != errno.ENOENT:
+            error ('%s: %s' % (pid, strerror))
+            return
+        raise
+    else:
+        maplines = maps.readlines ()
+        maps.close ()
+    
+    if len (maplines) == 0:
+        # handle kernel threads
+        if len (open ('/proc/%d/cmdline' % (pid)).read ()) == 0:
+            return
+
+        # Some time after 2.8.16, 'maps' became empty if it is not your process
+        error ('%i has no maps!' % (pid))
+        return
+
+    for line in maplines:
+        m = mapline.match (line)
+        if (m):
+            inode = string.atoi (m.group (1))
+            file = m.group (2)
+
+            if inode == 0:
+                continue
+
+            # remove ' (deleted)' suffix
+            if deleted.match (file):
+                file = file [0:-10]
+
+            if boring.match (file):
+                continue
+
+            # list file names whose inode numbers do not match their on-disk
+            # values; or files that do not exist at all
+            try:
+                if os.stat (file)[stat.ST_INO] != inode:
+                    seen.add ('%s %s %s' % (Process.get (pid).info (), 'i', file))
+            except OSError, (e, strerror):
+                if e == errno.ENOENT:
+                    seen.add ('%s %s %s' % (Process.get(pid).info (), 'd', file))
+                else:
+                    error ('%s %s: %s\n' % (Process.get(pid).info (), file, strerror))
+
+        else:
+            error ('error parsing "%s"' % (line [0:-1]))
+
+    for entry in seen:
+        print entry
+
+for pid in (int (pid) for pid in os.listdir ('/proc') if numeric.match (pid)):
+    delmaps (pid)
+
+if errors:
+    sys.exit (1)
