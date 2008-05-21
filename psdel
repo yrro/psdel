@@ -1,9 +1,7 @@
 #! /usr/bin/python
 
 # psdel - list processes that have mapped deleted files
-
 # by Sam Morris <sam@robots.org.uk>
-# version 20080505
 
 # Useful for seeing which processes need to be restarted after you upgrade
 # programs or shared libraries. Written to replace checkrestart(1) from the
